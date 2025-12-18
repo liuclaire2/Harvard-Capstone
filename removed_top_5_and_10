@@ -1,0 +1,161 @@
+import pandas as pd
+import networkx as nx
+import matplotlib.pyplot as plt
+from collections import defaultdict
+
+df = pd.read_csv("Final_Combined.csv")
+
+def fix_coauthors(x):
+    if pd.isna(x): 
+        return []
+    # Remove brackets and split
+    x = x.strip("[]")
+    if x == "":
+        return []
+    return [name.strip().strip("'").strip('"') for name in x.split(",")]
+
+df["coauthors"] = df["coauthors"].apply(fix_coauthors)
+
+
+def build_one_year_network_without_top_k(df, group, paper_year, k):
+    subset = df[(df["group"] == group) & (df["paper_year"] == paper_year)].copy()
+
+    remove_authors = set()
+
+    # K-Removal Logic 
+    while k > 0 and not subset.empty:
+        # Calculate the current degree for remaining authors
+        current_degrees = {}
+        for author in subset["author_name"].unique():
+            coauthors_list = subset[subset["author_name"] == author]["coauthors"].explode().unique()
+            current_degrees[author] = len(coauthors_list)
+
+        if not current_degrees:
+            break
+        
+        max_author = max(current_degrees, key=current_degrees.get)
+        remove_authors.add(max_author)
+        subset = subset[subset["author_name"] != max_author].copy()
+        k -= 1
+
+    # Rebuild the graph using the remaining filtered subset
+    participants = set(subset["author_name"].unique()) 
+    edges = []
+    all_authors = set()
+
+    for _, row in subset.iterrows():
+        author = row["author_name"]
+        coauthors = row["coauthors"]
+        
+        all_authors.add(author)
+        all_authors.update(coauthors)
+        
+        for co in coauthors:
+            edges.append((author, co))
+
+    G = nx.Graph()
+    G.add_nodes_from(all_authors)
+    G.add_edges_from(edges)
+
+    # Keep all remaining nodes to prevent blank graphs
+    G_final = G
+    participants_final = participants
+    nodes_to_keep = G.nodes() 
+    
+    return G_final, participants_final, nodes_to_keep
+
+
+
+def network_summary(G, participants):
+    num_nodes = G.number_of_nodes()
+    num_edges = G.number_of_edges()
+    
+    if num_nodes > 0:
+        avg_degree = sum(dict(G.degree()).values()) / num_nodes
+    else:
+        avg_degree = 0
+    
+    density = nx.density(G)
+    unique_coauthors = len(set(G.nodes()) - set(participants))
+    cluster_coefficient = nx.average_clustering(G)
+    
+    summary = {
+        "num_nodes": num_nodes,
+        "num_edges": num_edges,
+        "avg_degree": avg_degree,
+        "density": density,
+        "unique_coauthors": unique_coauthors,
+        "cluster_coefficient": cluster_coefficient
+    }
+    return summary
+
+
+
+def plot_network(G, participants, title, filename):
+    plt.figure(figsize=(14, 12))
+
+    pos = nx.spring_layout(G, seed=42, k=.8, iterations=200)
+    # pos = nx.spectral_layout(G)
+    # pos = nx.forceatlas2_layout(G)
+
+    stretch_factor = 2.0 
+    for node, coords in pos.items():
+        if node in participants:
+            coords[0] = coords[0] * stretch_factor
+            coords[1] = coords[1] * stretch_factor
+            pos[node] = coords
+    
+    # Colors and Sizes
+    color_map = ['red' if node in participants else 'lightblue' for node in G.nodes()]
+    degree_dict = dict(G.degree())
+    node_sizes = [max(degree_dict.get(n, 0) * 50, 80) for n in G.nodes()] 
+
+    # Draw elements
+    nx.draw_networkx_nodes(G, pos, 
+                           node_color=color_map, 
+                           node_size=node_sizes, 
+                           alpha=0.85)
+    nx.draw_networkx_edges(G, pos, 
+                           alpha=0.15, 
+                           width=0.5)
+
+    labels = {node: node for node in G.nodes() if node in participants} 
+    nx.draw_networkx_labels(G, pos, labels, font_size=6)
+
+    plt.title(title, fontsize=16)
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(filename, format="jpg", dpi=300)
+    plt.close()
+    print(f"Saved: {filename}")
+
+network_specs_k10 = [
+    ("treatment", 2017, "network_treatment_2017_k10_removed_full_cohort.jpg"),
+    ("control",    2017, "network_control_2017_k10_removed_full_cohort.jpg"),
+    ("treatment", 2023, "network_treatment_2023_k10_removed_full_cohort.jpg"),
+    ("control",    2023, "network_control_2023_k10_removed_full_cohort.jpg"),
+]
+
+K_TO_REMOVE = 10
+
+
+#debug
+#print(f"Starting network analysis: Removing Top {K_TO_REMOVE} high-degree authors from the FULL cohort.")
+
+for cohort, year, file in network_specs_k10:
+    
+    G, participants, all_nodes = build_one_year_network_without_top_k(
+        df, cohort, year, K_TO_REMOVE
+    )
+        
+    title = f"{cohort.capitalize()} Cohort Coauthor Network ({year}, Top {K_TO_REMOVE} Removed)"
+    
+    plot_network(G, participants, title, file) 
+    
+    summary = network_summary(G, participants)
+    print(f"\n- {cohort.capitalize()} {year} Network Summary (K={K_TO_REMOVE} Removed) -")
+    for k, v in summary.items():
+        if isinstance(v, float):
+            print(f"{k}: {v:.4f}")
+        else:
+            print(f"{k}: {v}")
